@@ -1,0 +1,108 @@
+
+name: Build signed Android APK
+
+# 1. Trusted branch push or manual run
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+      # 2. Get the source and install the build tools
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Record tool versions
+        run: |
+          flutter --version
+          java -version
+
+      # 4. Restore signing files before any Gradle configuration
+      - name: Prepare signing files
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          : "${KEYSTORE_BASE64:?Missing keystore secret}"
+          : "${STORE_PASSWORD:?Missing keystore password}"
+          : "${KEY_PASSWORD:?Missing key password}"
+          : "${KEY_ALIAS:?Missing key alias}"
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/lab-release.jks"
+
+          # Escape backslashes and spaces for Java properties
+          write_property() {
+            local value="$2"
+            if printf '%s' "$value" | LC_ALL=C grep -q '[^ -~]'; then
+              echo 'Signing values must contain printable ASCII characters.' >&2
+              exit 1
+            fi
+            value="${value//\\/\\\\}"
+            value="${value// /\\ }"
+            printf '%s=%s\n' "$1" "$value"
+          }
+
+          {
+            write_property storeFile "$RUNNER_TEMP/lab-release.jks"
+            write_property storePassword "$STORE_PASSWORD"
+            write_property keyPassword "$KEY_PASSWORD"
+            write_property keyAlias "$KEY_ALIAS"
+          } > android/key.properties
+
+      # 3. Install dependencies and analyze the project
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      # 5. Build with the signing configuration from Stage 2
+      - name: Build signed release APK
+        run: flutter build apk --release
+
+      # 6. Upload only the APK, then remove private signing files
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | tr -d '\r')
+          test -n "$version"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tic-tac-toe-${{ steps.version.outputs.value }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing files
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- android/key.properties "$RUNNER_TEMP/lab-release.jks"
