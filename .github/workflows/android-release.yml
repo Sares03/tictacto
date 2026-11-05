@@ -5,6 +5,7 @@ name: Build signed Android APK
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -13,6 +14,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
 
       # 2. Get the source and install the build tools
@@ -100,6 +103,35 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+      # Publish a GitHub Release for version tags
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | tr -d '\r')
+
+          case "$GITHUB_REF_NAME" in
+            v1.0.0) expected='1.0.0+1' ;;
+            v1.1.0) expected='1.1.0+2' ;;
+            *) echo 'Unsupported release tag'; exit 1 ;;
+          esac
+
+          if [ "$version" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME requires pubspec version $expected"
+            exit 1
+          fi
+
+          apk="tic-tac-toe-${GITHUB_REF_NAME}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "$apk"
+
+          gh release create "$GITHUB_REF_NAME" "$apk" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
 
       - name: Remove signing files
         if: always()
